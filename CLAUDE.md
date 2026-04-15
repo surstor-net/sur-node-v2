@@ -7,8 +7,8 @@ Read this first. It will orient you completely without needing to read the sourc
 SurStor v2 is a thin MCP server that gives Claude sessions persistent, cross-client memory backed by a local Covia venue. It replaces sur-node v1 (DLFS-backed, data loss on restart).
 
 Two files. That's the whole thing:
-- `surstor.mjs` — 7 core functions (snap/get/list/link/links/memory/tree)
-- `mcp-server.mjs` — wraps those 7 functions as MCP tools over stdio
+- `surstor.mjs` — 8 core functions (snap/get/list/link/links/memory/export/tree)
+- `mcp-server.mjs` — wraps those 8 functions as MCP tools over stdio
 
 ## What's Running Where
 

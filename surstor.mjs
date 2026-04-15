@@ -89,6 +89,35 @@ export async function sur_links(hash, rel = null) {
   return results;
 }
 
+// ── sur_export ────────────────────────────────────────────────────────────────
+// Write a snap's content to DLFS as a human-readable .md file
+// Creates the drive if it doesn't exist, then writes /sessions/{label}.md
+export async function sur_export(hash, { drive = 'surstor' } = {}) {
+  const artifact = await sur_get(hash);
+
+  // Ensure drive exists
+  try {
+    await venue.run('v/ops/dlfs/create-drive', { name: drive });
+  } catch {}  // already exists is fine
+
+  // Format as markdown
+  const md = [
+    `# ${artifact.label}`,
+    ``,
+    `**Hash:** \`${hash}\``,
+    `**Snapped:** ${artifact.snapped_at}`,
+    `**Tags:** ${artifact.tags?.join(', ')}`,
+    ``,
+    `---`,
+    ``,
+    artifact.summary || artifact.content || '(no content)',
+  ].join('\n');
+
+  const path = `/sessions/${artifact.label}.md`;
+  await venue.run('v/ops/dlfs/write', { drive, path, content: md });
+  return { drive, path, label: artifact.label };
+}
+
 // ── sur_tree ──────────────────────────────────────────────────────────────────
 // Walk the provenance graph from an artifact (follows outgoing links)
 // dir: 'down' (default) = follow what this artifact links to (its references/ancestors)
