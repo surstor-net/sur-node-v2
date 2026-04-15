@@ -1,9 +1,8 @@
 node_modules/
 
-# Prototype / test scripts (not part of the published library)
+# Prototype scripts (not part of the published library)
 sur-snap.mjs
 test.mjs
-test-all.mjs
 
 # Local env
 .env
