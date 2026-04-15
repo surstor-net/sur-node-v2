@@ -18,7 +18,7 @@ if not exist "%COVIA_JAR%" (
 
 echo Starting Covia from %COVIA_JAR%...
 cd /d "%~dp0"
-start /min "Covia" java -jar "%COVIA_JAR%"
+start /min "Covia" java -jar "%COVIA_JAR%" "C:\Users\rich\.covia\config.json"
 
 REM Wait for readiness (up to 15 seconds)
 set /a tries=0
