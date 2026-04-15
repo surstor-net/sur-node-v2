@@ -1,7 +1,7 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { sur_snap, sur_get, sur_list, sur_link, sur_links, sur_memory } from './surstor.mjs';
+import { sur_snap, sur_get, sur_list, sur_link, sur_links, sur_memory, sur_tree } from './surstor.mjs';
 
 const server = new Server(
   { name: 'sur-node-v2', version: '2.0.0' },
@@ -80,6 +80,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           tag:   { type: 'string', description: 'Filter tag (default: session-snapshot)' }
         }
       }
+    },
+    {
+      name: 'sur_tree',
+      description: 'Walk the full provenance tree from an artifact. dir=down follows outgoing links (what this references); dir=up scans for inbound links (what references this).',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          hash:  { type: 'string', description: 'The sha256: hash to start from' },
+          dir:   { type: 'string', description: 'Direction: down (default, outgoing) or up (inbound scan)' },
+          depth: { type: 'number', description: 'Max hops to traverse (default 10)' }
+        },
+        required: ['hash']
+      }
     }
   ]
 }));
@@ -106,6 +119,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case 'sur_memory':
         result = await sur_memory({ limit: args.limit, tag: args.tag });
+        break;
+      case 'sur_tree':
+        result = await sur_tree(args.hash, { dir: args.dir, depth: args.depth });
         break;
       default:
         throw new Error(`Unknown tool: ${name}`);

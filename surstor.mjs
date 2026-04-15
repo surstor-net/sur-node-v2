@@ -89,6 +89,51 @@ export async function sur_links(hash, rel = null) {
   return results;
 }
 
+// ── sur_tree ──────────────────────────────────────────────────────────────────
+// Walk the provenance graph from an artifact (follows outgoing links)
+// dir: 'down' (default) = follow what this artifact links to (its references/ancestors)
+//      'up' = scan for artifacts that link TO this hash (expensive, full scan)
+export async function sur_tree(hash, { dir = 'down', depth = 10 } = {}) {
+  const visited = new Set();
+
+  async function walk(h, d) {
+    if (d <= 0 || visited.has(h)) return { hash: h, truncated: true };
+    visited.add(h);
+
+    let label = '(unknown)', snapped_at = null;
+    try {
+      const art = await sur_get(h);
+      label = art.label;
+      snapped_at = art.snapped_at;
+    } catch {}
+
+    const links = await sur_links(h);
+    const branches = await Promise.all(
+      links.map(async link => ({
+        rel: link.rel,
+        node: await walk(link.to, d - 1)
+      }))
+    );
+
+    return { hash: h, label, snapped_at, branches };
+  }
+
+  if (dir === 'up') {
+    // Scan all artifacts for ones that link to this hash
+    const all = await sur_list({ limit: 200 });
+    const inbound = [];
+    for (const item of all) {
+      const links = await sur_links(item.hash);
+      if (links.some(l => l.to === hash)) {
+        inbound.push({ hash: item.hash, label: item.label, snapped_at: item.snapped_at, rel: links.find(l => l.to === hash).rel });
+      }
+    }
+    return { hash, dir: 'up', inbound };
+  }
+
+  return walk(hash, depth);
+}
+
 // ── sur_memory ────────────────────────────────────────────────────────────────
 // Surface recent session snapshots for context injection
 export async function sur_memory({ limit = 5, tag = 'session-snapshot' } = {}) {

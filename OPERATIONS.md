@@ -55,7 +55,7 @@ Default port: **8090**. If you need a different port, pass `--port XXXX` and upd
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | node C:/Users/rich/PROJECTS/sur-v2/mcp-server.mjs
 ```
 
-Expected: JSON response listing all 6 tools (`sur_snap`, `sur_get`, `sur_list`, `sur_link`, `sur_links`, `sur_memory`).
+Expected: JSON response listing all 7 tools (`sur_snap`, `sur_get`, `sur_list`, `sur_link`, `sur_links`, `sur_memory`, `sur_tree`).
 
 ### From Claude Desktop
 
@@ -170,21 +170,31 @@ Kill the conflicting process or pass a different port to the JAR and update `COV
 
 ## Known Gaps (as of 2026-04-15)
 
-### Covia doesn't autostart with Windows
+### Covia autostart
 
-Covia must be manually started before Claude Desktop. This means if you reboot and open Claude Desktop immediately, sur-node-v2 will fail until you start Covia.
+Two scripts are included:
 
-**Workaround:** Add Covia JAR launch to Windows Task Scheduler or Startup folder.
+- `covia-start.bat` — launches Covia if not already running, waits for readiness. Edit `COVIA_DIR` at the top to point at your JAR folder.
+- `covia-autostart-install.ps1` — registers `covia-start.bat` as a Windows Task Scheduler task that fires at login.
 
-**Long-term fix:** Wire Covia autostart into the sur-node-v2 MCP server startup via a child_process spawn with a readiness check.
+**To install:**
+```powershell
+# Run once as Administrator
+powershell -ExecutionPolicy Bypass -File C:\Users\rich\PROJECTS\sur-v2\covia-autostart-install.ps1
+```
+
+**To test manually:**
+```cmd
+schtasks /run /tn CoviaAutostart
+```
 
 ### DLFS (v1) still running alongside v2
 
 Both sur-node and sur-node-v2 are active in Claude Desktop. This is intentional during the transition — v1 has historical metadata (labels, tags) in SQLite even though the blob content is lost. Once you've confirmed all active work is in v2, sur-node can be removed from claude_desktop_config.json.
 
-### No `sur_tree` in v2
+### `sur_tree` ported to v2
 
-v1's `sur-tree` (provenance graph traversal) hasn't been ported to v2 yet. `sur_links` gives you one hop; full tree traversal needs to be added to `surstor.mjs`.
+`sur_tree` is now the 7th MCP tool. `dir=down` follows outgoing links recursively; `dir=up` does a full scan for inbound links (slower on large stores).
 
 ---
 
