@@ -118,6 +118,75 @@ export async function sur_export(hash, { drive = 'surstor' } = {}) {
   return { drive, path, label: artifact.label };
 }
 
+// ── sur_capture ───────────────────────────────────────────────────────────────
+// Read a Claude Code session JSONL and write the full transcript to DLFS.
+// sessionPath: absolute path to the .jsonl file
+// label: name for the transcript file (default: session-{timestamp})
+// drive: DLFS drive name (default: surstor)
+export async function sur_capture(sessionPath, { label, drive = 'surstor' } = {}) {
+  const { readFileSync } = await import('fs');
+  const { basename } = await import('path');
+
+  const raw = readFileSync(sessionPath, 'utf8');
+  const lines = raw.trim().split('\n').filter(Boolean);
+
+  const messages = [];
+  for (const line of lines) {
+    try {
+      const entry = JSON.parse(line);
+      if (entry.type === 'user' && entry.message?.role === 'user') {
+        const content = Array.isArray(entry.message.content)
+          ? entry.message.content.filter(c => c.type === 'text').map(c => c.text).join('\n')
+          : entry.message.content;
+        if (content?.trim()) messages.push({ role: 'user', content: content.trim(), ts: entry.timestamp });
+      } else if (entry.type === 'assistant' && entry.message?.role === 'assistant') {
+        const content = Array.isArray(entry.message.content)
+          ? entry.message.content.filter(c => c.type === 'text').map(c => c.text).join('\n')
+          : entry.message.content;
+        if (content?.trim()) messages.push({ role: 'assistant', content: content.trim(), ts: entry.timestamp });
+      }
+    } catch {}
+  }
+
+  if (!messages.length) throw new Error('No messages found in session file');
+
+  const sessionId = basename(sessionPath, '.jsonl');
+  const ts = messages[0]?.ts?.slice(0, 10) ?? new Date().toISOString().slice(0, 10);
+  const fileLabel = label ?? `session-${ts}-${sessionId.slice(0, 8)}`;
+
+  const md = [
+    `# Session Transcript: ${fileLabel}`,
+    ``,
+    `**Session ID:** ${sessionId}`,
+    `**Date:** ${ts}`,
+    `**Messages:** ${messages.length}`,
+    ``,
+    `---`,
+    ``,
+    ...messages.map(m => [
+      `### ${m.role === 'user' ? 'User' : 'Claude'} — ${m.ts ?? ''}`,
+      ``,
+      m.content,
+      ``,
+    ].join('\n')),
+  ].join('\n');
+
+  // Ensure drive exists
+  try { await venue.run('v/ops/dlfs/create-drive', { name: drive }); } catch {}
+
+  const path = `/transcripts/${fileLabel}.md`;
+  await venue.run('v/ops/dlfs/write', { drive, path, content: md });
+
+  // Also snap a reference into SurStor so it's findable by hash
+  const { hash } = await sur_snap(
+    fileLabel,
+    `Full transcript captured from ${sessionPath}. ${messages.length} messages. Stored in DLFS at ${drive}:${path}`,
+    ['transcript', 'full-capture']
+  );
+
+  return { drive, path, label: fileLabel, messages: messages.length, hash };
+}
+
 // ── sur_ls ────────────────────────────────────────────────────────────────────
 // List files/dirs in a DLFS drive. Lists drives if no drive given.
 export async function sur_ls({ drive, path = '/' } = {}) {

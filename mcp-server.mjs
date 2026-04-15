@@ -1,7 +1,7 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { sur_snap, sur_get, sur_list, sur_link, sur_links, sur_memory, sur_tree, sur_export, sur_ls } from './surstor.mjs';
+import { sur_snap, sur_get, sur_list, sur_link, sur_links, sur_memory, sur_tree, sur_export, sur_ls, sur_capture } from './surstor.mjs';
 
 const server = new Server(
   { name: 'sur-node-v2', version: '2.0.0' },
@@ -94,6 +94,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       }
     },
     {
+      name: 'sur_capture',
+      description: 'Capture a full Claude Code session transcript from its .jsonl file and write it to DLFS. Also snaps a reference into SurStor. Use this at end of session for complete verbatim record — essential for 970.re agent audit trails.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sessionPath: { type: 'string', description: 'Absolute path to the .jsonl session file (e.g. C:/Users/rich/.claude/projects/C--Users-rich/{session-id}.jsonl)' },
+          label:       { type: 'string', description: 'Label for the transcript (default: session-{date}-{id})' },
+          drive:       { type: 'string', description: 'DLFS drive name (default: surstor)' }
+        },
+        required: ['sessionPath']
+      }
+    },
+    {
       name: 'sur_ls',
       description: 'List DLFS drives (no args) or files in a drive path. Browsing companion to sur_export.',
       inputSchema: {
@@ -145,6 +158,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case 'sur_export':
         result = await sur_export(args.hash, { drive: args.drive });
+        break;
+      case 'sur_capture':
+        result = await sur_capture(args.sessionPath, { label: args.label, drive: args.drive });
         break;
       case 'sur_ls':
         result = await sur_ls({ drive: args.drive, path: args.path });
