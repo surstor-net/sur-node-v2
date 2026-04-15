@@ -118,6 +118,17 @@ export async function sur_export(hash, { drive = 'surstor' } = {}) {
   return { drive, path, label: artifact.label };
 }
 
+// ── sur_ls ────────────────────────────────────────────────────────────────────
+// List files/dirs in a DLFS drive. Lists drives if no drive given.
+export async function sur_ls({ drive, path = '/' } = {}) {
+  if (!drive) {
+    const result = await venue.run('v/ops/dlfs/list-drives', {});
+    return { drives: result?.drives ?? result ?? [] };
+  }
+  const result = await venue.run('v/ops/dlfs/list', { drive, path });
+  return { drive, path, entries: result?.entries ?? result ?? [] };
+}
+
 // ── sur_tree ──────────────────────────────────────────────────────────────────
 // Walk the provenance graph from an artifact (follows outgoing links)
 // dir: 'down' (default) = follow what this artifact links to (its references/ancestors)

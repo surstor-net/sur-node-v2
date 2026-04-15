@@ -1,7 +1,7 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { sur_snap, sur_get, sur_list, sur_link, sur_links, sur_memory, sur_tree, sur_export } from './surstor.mjs';
+import { sur_snap, sur_get, sur_list, sur_link, sur_links, sur_memory, sur_tree, sur_export, sur_ls } from './surstor.mjs';
 
 const server = new Server(
   { name: 'sur-node-v2', version: '2.0.0' },
@@ -94,6 +94,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       }
     },
     {
+      name: 'sur_ls',
+      description: 'List DLFS drives (no args) or files in a drive path. Browsing companion to sur_export.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          drive: { type: 'string', description: 'Drive name (omit to list all drives)' },
+          path:  { type: 'string', description: 'Path to list (default: /)' }
+        }
+      }
+    },
+    {
       name: 'sur_tree',
       description: 'Walk the full provenance tree from an artifact. dir=down follows outgoing links (what this references); dir=up scans for inbound links (what references this).',
       inputSchema: {
@@ -134,6 +145,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
       case 'sur_export':
         result = await sur_export(args.hash, { drive: args.drive });
+        break;
+      case 'sur_ls':
+        result = await sur_ls({ drive: args.drive, path: args.path });
         break;
       case 'sur_tree':
         result = await sur_tree(args.hash, { dir: args.dir, depth: args.depth });
