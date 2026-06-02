@@ -2,18 +2,18 @@
 
 **SurStor v2** — Persistent artifact memory for AI sessions, via MCP.
 
-Content-addressed session snapshots stored in a local SQLite database. Snap a session, retrieve it by hash in any future session, link artifacts into a provenance graph. Works with Claude Code, Claude Desktop, and any MCP-compatible client.
+Content-addressed session snapshots stored in a local SQLite database. Snap a session, retrieve it by hash in any future session, link artifacts into a provenance graph. Works with Claude, ChatGPT, Gemini, Cursor, and any MCP-compatible client.
 
 ---
 
 ## What It Is
 
-~200 lines of JavaScript that gives any Claude session persistent memory across restarts, machines, and clients.
+~200 lines of JavaScript that gives any AI session persistent memory across restarts, machines, and clients.
 
 Every snap is:
 - **Content-addressed** — sha256 hash is the canonical ID
-- **Durable** — stored in `surstor.db` (SQLite), survives reboots
-- **MCP-native** — 10 tools Claude can call directly
+- **Durable** — stored in `surstor.db` (SQLite + WAL mode), survives reboots
+- **MCP-native** — 10 tools the AI can call directly
 
 ---
 
@@ -25,18 +25,12 @@ Every snap is:
 git clone https://github.com/surstor-net/sur-node-v2
 cd sur-node-v2
 npm install
-```
-
-Verify it works:
-```bash
 npm test
 ```
 
-Expected output: snap hashes, a get result, a list, a link, and memory output. No errors.
-
 ---
 
-## Wire into Claude
+## Wire into Claude (stdio — local)
 
 ### Claude Code
 
@@ -53,9 +47,8 @@ Add to `~/.claude.json` under your project's `mcpServers`:
 }
 ```
 
-### Claude Desktop (Windows)
+### Claude Desktop — Windows
 
-Add to `claude_desktop_config.json`:
 ```
 C:\Users\{you}\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude_desktop_config.json
 ```
@@ -71,7 +64,7 @@ C:\Users\{you}\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Cl
 }
 ```
 
-### Claude Desktop (Mac)
+### Claude Desktop — Mac
 
 ```
 ~/Library/Application Support/Claude/claude_desktop_config.json
@@ -88,7 +81,119 @@ C:\Users\{you}\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Cl
 }
 ```
 
-Restart Claude Desktop after editing. The tools appear under the 🔨 menu.
+Restart Claude Desktop after editing. Tools appear under the 🔨 menu.
+
+---
+
+## Wire into Other Clients
+
+### Gemini CLI (stdio — works as-is)
+
+Gemini CLI supports stdio MCP servers natively, same config format as Claude Desktop.
+
+```json
+// ~/.gemini/settings.json
+{
+  "mcpServers": {
+    "sur-node-v2": {
+      "command": "node",
+      "args": ["/path/to/sur-node-v2/mcp-server.mjs"]
+    }
+  }
+}
+```
+
+### ChatGPT Apps (remote HTTPS required)
+
+ChatGPT only supports remote MCP servers — no local stdio. You need an HTTPS endpoint. See [HTTP Transport](#http-transport) below to expose sur-node-v2 over the network, then:
+
+1. Go to **ChatGPT Settings → Apps & Connectors**
+2. Add your server URL: `https://your-host/mcp`
+3. Complete OAuth if your server requires it
+
+> Requires ChatGPT Plus or Pro. Workspace admins must enable Developer Mode: Admin Settings → Permissions & Roles → Connected Data.
+
+### Gemini Enterprise / Google Workspace (remote HTTPS required)
+
+Gemini Enterprise uses Streamable HTTP transport exclusively (SSE is not supported). Same setup: expose via HTTP transport, then register your `https://your-host/mcp` endpoint in the Google Workspace MCP server data store.
+
+### Cursor / Windsurf / Other MCP Clients (stdio)
+
+Most IDE-based MCP clients use the same stdio config format as Claude Desktop. Check your client's MCP docs for the settings file location, then use the same `command`/`args` pattern.
+
+### DeepSeek
+
+DeepSeek's consumer app (`chat.deepseek.com`) has no MCP client surface. If you're building an agent with DeepSeek as the model backend, you can call MCP tools via their OpenAI-compatible API — wire the HTTP transport endpoint into your agent framework (LangChain, etc.).
+
+---
+
+## HTTP Transport
+
+To serve remote clients (ChatGPT, Gemini Enterprise, any browser-based client), use [`supergateway`](https://github.com/supermaven-inc/supergateway) to wrap the stdio server as a Streamable HTTP endpoint. No code changes to sur-node-v2 needed.
+
+### Quick start (local dev + ngrok tunnel)
+
+```bash
+# Terminal 1 — start HTTP gateway
+npx -y supergateway \
+  --stdio "node /path/to/sur-node-v2/mcp-server.mjs" \
+  --port 8000 \
+  --outputTransport streamableHttp
+
+# Terminal 2 — expose publicly
+ngrok http 8000
+# → https://xxxx.ngrok.io/mcp
+```
+
+Paste `https://xxxx.ngrok.io/mcp` into ChatGPT Apps or Gemini Enterprise.
+
+### Production
+
+Run supergateway behind nginx or Caddy for TLS termination, then add a bearer token check:
+
+```nginx
+location /mcp {
+  proxy_pass http://localhost:8000;
+  # Add auth header validation here
+}
+```
+
+> **SSE vs Streamable HTTP:** SSE was deprecated in MCP spec 2025-03-26. Always use `--outputTransport streamableHttp` for new deployments. Note: `mcp-remote` (the stdio bridge used by older Claude Desktop setups) expects legacy SSE and is not compatible with Streamable HTTP — keep the native stdio path for local clients.
+
+---
+
+## Shared Snaps (Multi-User)
+
+By default each user has their own `surstor.db`. For a team that wants shared memory across sessions and users, two realistic paths:
+
+### Option A: Central server (simplest)
+
+Deploy one instance of sur-node-v2 + supergateway on a VPS or [Fly.io](https://fly.io). Everyone points at the same HTTPS endpoint. All snaps land in a single `surstor.db`.
+
+SQLite in WAL mode (already enabled) handles concurrent reads well; writes serialize. For a small team of agents snapping sessions occasionally, this is fine.
+
+```bash
+# On your server
+SURSTOR_DB=/data/shared-surstor.db \
+  npx -y supergateway \
+    --stdio "node /app/mcp-server.mjs" \
+    --port 8000 \
+    --outputTransport streamableHttp
+```
+
+Protect the endpoint with a shared bearer token in your reverse proxy. All team members use `https://your-server/mcp` as their MCP server URL.
+
+### Option B: Turso (cloud SQLite, scale-up path)
+
+[Turso](https://turso.tech) is a managed libSQL service (SQLite-compatible, HTTP-accessible, embedded replicas). It supports true concurrent writes via their new Turso Database engine.
+
+The migration requires swapping `better-sqlite3` for `@libsql/client` — libSQL's API is async where better-sqlite3 is sync, so it's a real rewrite of the DB layer (~30 lines). Worth doing if you need geographic distribution, managed backups, or high write concurrency.
+
+For most teams, **Option A is the right start.** Move to Turso when you outgrow it.
+
+### Option C: Git-syncing the .db file
+
+Don't. SQLite's binary format generates merge conflicts on every concurrent write. This only works as a read-only archive.
 
 ---
 
@@ -101,7 +206,7 @@ Restart Claude Desktop after editing. The tools appear under the 🔨 menu.
 | `sur_list` | List artifacts, newest first, optionally filtered by tag |
 | `sur_link` | Create a provenance link between two artifacts |
 | `sur_links` | List all links from an artifact |
-| `sur_memory` | Inject recent session context (formatted for Claude) |
+| `sur_memory` | Inject recent session context (formatted for the AI) |
 | `sur_export` | Write a snap as a readable `.md` file to disk |
 | `sur_capture` | Snap a full Claude Code `.jsonl` transcript by path |
 | `sur_ls` | Directory-style listing of the store |
@@ -113,11 +218,11 @@ Restart Claude Desktop after editing. The tools appear under the 🔨 menu.
 
 ### Snap a session
 
-Tell Claude at the end of any session:
+At the end of any session, tell the AI:
 
 > `sur-snap`
 
-Claude calls `sur_snap` with a label, summary, and tags. You get back a hash.
+The AI calls `sur_snap` with a label, summary, and tags. You get back a hash.
 
 ### Retrieve in a future session
 
@@ -127,7 +232,7 @@ Claude calls `sur_snap` with a label, summary, and tags. You get back a hash.
 
 > `sur-memory`
 
-Claude calls `sur_memory` and injects your last 5 sessions as context automatically.
+The AI calls `sur_memory` and injects your last 5 sessions as context.
 
 ---
 
@@ -156,15 +261,15 @@ Supported rel types: `follows`, `supersedes`, `references`, `corrects`, `respond
 Walk the graph:
 
 ```
-sur_tree(hash)           // outgoing links (what this references)
-sur_tree(hash, dir=up)   // inbound links (what references this)
+sur_tree(hash)              // outgoing links (what this references)
+sur_tree(hash, dir='up')    // inbound links (what references this)
 ```
 
 ---
 
 ## Storage
 
-Everything lives in `surstor.db` in the repo directory. SQLite — no server, no daemon, no dependencies beyond Node.js.
+Everything lives in `surstor.db` (SQLite, WAL mode). No server, no daemon.
 
 ```
 surstor.db
@@ -172,7 +277,17 @@ surstor.db
 └── links      (from_hash, rel, to_hash, created_at)
 ```
 
-Backup: just copy `surstor.db`. That's your entire history.
+**Custom path:** Set `SURSTOR_DB=/path/to/your.db` to use a different location (useful for shared or network deployments).
+
+**Backup:** `cp surstor.db surstor.db.bak` — that's your entire history.
+
+---
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SURSTOR_DB` | `./surstor.db` | Path to the SQLite database file |
 
 ---
 
@@ -182,7 +297,7 @@ Backup: just copy `surstor.db`. That's your entire history.
 surstor.mjs      ← core library: all 10 functions
 mcp-server.mjs   ← MCP stdio server
 test-all.mjs     ← integration test
-surstor.db       ← your data (created on first snap)
+surstor.db       ← your data (created on first snap, gitignored)
 package.json
 ```
 
@@ -192,6 +307,7 @@ package.json
 
 - [SurStor](https://surstor.com) — Agent Artifact Availability network
 - [AAA Framework](https://cumulativecomputing.org) — Cumulative Computing theoretical foundation
+- [supergateway](https://github.com/supermaven-inc/supergateway) — stdio → HTTP bridge for MCP servers
 
 ---
 

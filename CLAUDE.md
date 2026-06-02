@@ -35,10 +35,12 @@ README.md          ← human-facing docs / GitHub
 
 ## Key Decisions
 
-- **SQLite is the source of truth** — `surstor.db` in the repo dir, durable across reboots
+- **SQLite is the source of truth** — `surstor.db` in the repo dir (or `SURSTOR_DB` env var), durable across reboots
+- **WAL mode enabled** — `db.pragma('journal_mode = WAL')` on startup; improves concurrent read performance
 - **No external services** — Covia removed entirely; nothing to start or manage
 - **`session-snapshot` tag always injected** — `sur_snap` adds it automatically so `sur_memory` always finds sessions
 - **Content-addressed** — same content always produces the same sha256 hash (idempotent snaps)
+- **HTTP transport via supergateway** — for ChatGPT/Gemini Enterprise; no code changes needed in this repo
 
 ## Common Tasks
 

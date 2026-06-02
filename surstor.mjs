@@ -5,7 +5,9 @@ import { fileURLToPath } from 'url';
 import { mkdirSync, writeFileSync } from 'fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const db = new Database(join(__dirname, 'surstor.db'));
+const dbPath = process.env.SURSTOR_DB || join(__dirname, 'surstor.db');
+const db = new Database(dbPath);
+db.pragma('journal_mode = WAL');
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS artifacts (
