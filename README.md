@@ -111,16 +111,14 @@ Browser-based and enterprise clients can't run local stdio processes. Use [`supe
 **Start the gateway:**
 
 ```bash
-npx -y supergateway \
-  --stdio "node /path/to/sur-node-v2/mcp-server.mjs" \
-  --port 8000 \
-  --outputTransport streamableHttp
+npm run serve:http
 # MCP endpoint: http://localhost:8000/mcp
 ```
 
 **Expose publicly** (dev/testing):
 
 ```bash
+npm run serve:http &
 ngrok http 8000
 # → https://xxxx.ngrok.io/mcp
 ```
