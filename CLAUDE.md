@@ -4,19 +4,22 @@ Read this first. It will orient you completely without needing to read the sourc
 
 ## What This Repo Is
 
-SurStor v2 is a thin MCP server that gives Claude sessions persistent, cross-client memory backed by a local Covia venue. It replaces sur-node v1 (DLFS-backed, data loss on restart).
+SurStor v2 is a thin MCP server that gives Claude sessions persistent, durable memory backed by a local SQLite database. No external services, no daemons, no Covia.
 
-Two files. That's the whole thing:
-- `surstor.mjs` — 8 core functions (snap/get/list/link/links/memory/export/tree)
-- `mcp-server.mjs` — wraps those 8 functions as MCP tools over stdio
+Two files do everything:
+- `surstor.mjs` — 10 core functions (snap/get/list/link/links/memory/export/capture/ls/tree)
+- `mcp-server.mjs` — wraps those 10 functions as MCP tools over stdio
 
-## What's Running Where
+## Storage Architecture
 
-| Service | URL | What It Is |
-|---------|-----|-----------|
-| Covia venue | `http://localhost:8090` | The actual data store — start this first |
-| sur-node v1 | via MCP stdio | Legacy DLFS-backed server, still in Claude Desktop |
-| sur-node-v2 | via MCP stdio | This repo — Covia-backed, the active one |
+```
+Claude (MCP call)
+  → mcp-server.mjs (tool handler)
+    → surstor.mjs
+      → surstor.db (SQLite, same directory)
+```
+
+**SQLite is the only store.** Data survives reboots. No external service required.
 
 ## File Map
 
@@ -24,31 +27,32 @@ Two files. That's the whole thing:
 surstor.mjs        ← core library — edit this to change behavior
 mcp-server.mjs     ← MCP server — edit this to add/change tools
 test-all.mjs       ← integration test — run this to verify everything works
-package.json       ← two deps: @covia/covia-sdk, @modelcontextprotocol/sdk
+surstor.db         ← your data (auto-created on first snap)
+package.json       ← one dep: better-sqlite3 + @modelcontextprotocol/sdk
 CLAUDE.md          ← this file
 README.md          ← human-facing docs / GitHub
-ARCHITECTURE.md    ← deep dive on Covia workspace internals
-OPERATIONS.md      ← runbook: starting services, troubleshooting
 ```
+
+## Key Decisions
+
+- **SQLite is the source of truth** — `surstor.db` in the repo dir, durable across reboots
+- **No external services** — Covia removed entirely; nothing to start or manage
+- **`session-snapshot` tag always injected** — `sur_snap` adds it automatically so `sur_memory` always finds sessions
+- **Content-addressed** — same content always produces the same sha256 hash (idempotent snaps)
 
 ## Common Tasks
 
 ### Verify everything is working
 ```bash
-node test-all.mjs
+npm test
 ```
-Should produce: snap hashes, a get result, a list, a link, and sur_memory output. No errors.
+Should produce snap hashes, a get result, a list, a link, and `sur_memory` output. No errors.
 
 ### Test the MCP server in isolation
 ```bash
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | node mcp-server.mjs
 ```
-Should return all 6 tools.
-
-### Check Covia is running
-```bash
-curl http://localhost:8090/api/v1/status
-```
+Should return all 10 tools.
 
 ### Snap the current session
 Call `sur_snap` via MCP, or from code:
@@ -57,43 +61,28 @@ import { sur_snap } from './surstor.mjs';
 const { hash } = await sur_snap('my-label', 'summary of what happened', ['tag1', 'tag2']);
 ```
 
-### Retrieve a snap by hash
-```js
-import { sur_get } from './surstor.mjs';
-const content = await sur_get('sha256:...');
-```
+## Claude Desktop Config Entry (Windows)
 
-## Key Decisions Already Made
-
-- **Paths use `w/` namespace** — Covia workspace requires `w/` prefix. All paths are `w/surstor/...`
-- **`session-snapshot` tag is always injected** — `sur_snap` adds it automatically so `sur_memory` always finds everything
-- **No DLFS, no SQLite, no REST server** — pure Covia lattice storage
-- **`COVIA_URL` env var** — defaults to `http://localhost:8090`, override in claude_desktop_config.json
-
-## Claude Desktop Config Entry
-
-Located at:
+File location:
 `C:\Users\rich\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude_desktop_config.json`
 
 ```json
 "sur-node-v2": {
   "command": "node",
-  "args": ["C:/Users/rich/PROJECTS/sur-v2/mcp-server.mjs"],
-  "env": {
-    "COVIA_URL": "http://localhost:8090"
-  }
+  "args": ["C:/Users/rich/PROJECTS/sur-v2/mcp-server.mjs"]
 }
 ```
 
+No `env` block needed — Covia is gone.
+
 ## What NOT to Change
 
-- Don't rename the workspace paths (`w/surstor/...`) — existing snaps will become unreachable
+- Don't rename `surstor.db` without updating the path in `surstor.mjs` line 8
 - Don't remove the `session-snapshot` auto-inject — `sur_memory` depends on it
-- Don't switch from ES modules (`.mjs`) — Covia SDK requires ESM
+- Don't switch from ES modules (`.mjs`) — `@modelcontextprotocol/sdk` requires ESM
 
 ## Owner Context
 
 - Rich Kopcho, Paisley LLC / SDK Co LLC, Northern Colorado
-- Covia invented by Mike Anderson (CTO/architect)
 - Part of the SurStor / AAA Framework / Cumulative Computing stack
-- Related projects: sur-node (v1), Paisley, ACE Credits, MLSpy, 970.re
+- Related projects: Paisley wallet, MLSpy, 970.re, Winnow

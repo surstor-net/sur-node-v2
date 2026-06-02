@@ -1,184 +1,133 @@
 # ARCHITECTURE.md — SurStor v2
 
-## The Core Question: Where Does It Store Files?
+## Storage
 
-Short answer: **inside Covia's internal lattice storage**, not as user-visible files on the filesystem.
-
-When you call `sur_snap`, your content travels this path:
+Everything lives in `surstor.db` — a SQLite file in the repo directory. Created automatically on first snap. No server, no daemon, no external dependencies.
 
 ```
 Claude (MCP call)
-  → mcp-server.mjs (tool handler)
-    → surstor.mjs sur_snap()
-      → venue.run('v/ops/covia/write', { path: 'w/surstor/artifacts/{hash}', value: {...} })
-        → Covia JAR HTTP API (localhost:8090)
-          → Covia internal lattice store (disk, inside JAR data directory)
+  → mcp-server.mjs
+    → surstor.mjs
+      → surstor.db (SQLite)
 ```
 
-The data lives in Covia's data directory, managed entirely by the JAR. You don't interact with it directly — you read and write through the Covia API using workspace paths.
+### Schema
+
+```sql
+artifacts (
+  hash       TEXT PRIMARY KEY,   -- sha256:{64 hex chars}
+  label      TEXT,               -- human-readable name
+  tags       TEXT,               -- JSON array: ["session-snapshot", ...]
+  summary    TEXT,               -- full session summary
+  snapped_at TEXT,               -- ISO 8601 timestamp
+  size       INTEGER             -- byte size of content JSON
+)
+
+links (
+  link_hash  TEXT,               -- composite key: from:rel:to
+  from_hash  TEXT,               -- source artifact
+  to_hash    TEXT,               -- target artifact
+  rel        TEXT,               -- relationship type
+  created_at TEXT
+)
+```
 
 ---
 
-## Workspace Path Structure
+## Content Addressing
 
-All SurStor data lives under the `w/surstor/` prefix in the Covia workspace. The `w/` prefix is required by Covia — it means "workspace namespace" (as opposed to `o/` for operations).
+The sha256 hash is computed from the JSON-serialized content object:
 
-```
-w/
-└── surstor/
-    ├── artifacts/
-    │   └── sha256:{hash}          ← full artifact JSON (label, summary, tags, snapped_at)
-    ├── labels/
-    │   └── {label}                ← maps label → hash (for lookup by name)
-    ├── tags/
-    │   └── {tag}/
-    │       └── sha256:{hash}      ← maps tag → hash (tag index)
-    └── links/
-        └── sha256:{fromHash}/
-            └── {rel}/
-                └── sha256:{toHash} ← provenance edge (from, rel, to, created_at)
+```js
+const content = { type, label, summary, tags, snapped_at };
+const hash = 'sha256:' + createHash('sha256').update(JSON.stringify(content)).digest('hex');
 ```
 
-### Why This Structure
-
-**Artifacts** are stored by hash for content-addressability — the same content always produces the same path. If you snap identical content twice, it writes to the same path (idempotent).
-
-**Labels** are a secondary index — human-readable names that point to hashes. Labels are not unique enforced; the last write wins.
-
-**Tags** are a fan-out index — each tag has its own directory of hashes. Listing `w/surstor/tags/session-snapshot/` gives you every snapped session.
-
-**Links** form a directed graph — `{from}/{rel}/{to}` captures a typed relationship between two artifacts. Listing `w/surstor/links/{hash}/` gives all outbound edges from that artifact.
+Properties:
+- **Deterministic** — same content always produces the same hash
+- **Tamper-evident** — changing content changes the hash
+- **Idempotent** — snapping identical content twice is a no-op (same hash, existing row skipped)
+- **Portable** — the hash is the only ID needed to retrieve from any copy of the db
 
 ---
 
 ## How Each Function Works
 
 ### `sur_snap(label, summary, tags)`
-
-1. Builds content object: `{ type, label, summary, tags, snapped_at }`
-2. JSON serializes it
-3. SHA256 hashes the JSON → the canonical ID
-4. Writes artifact to `w/surstor/artifacts/{hash}`
-5. Writes label index to `w/surstor/labels/{label}`
-6. For each tag (including auto-injected `session-snapshot`): writes `w/surstor/tags/{tag}/{hash}`
-7. Returns `{ hash, label }`
-
-Total writes per snap: `2 + N tags` Covia workspace operations.
+1. Auto-injects `session-snapshot` tag (union with caller-provided tags)
+2. Builds content JSON, computes sha256 hash
+3. INSERTs into `artifacts` (skips if hash already exists)
+4. Returns `{ hash, label, deduplicated }`
 
 ### `sur_get(hash)`
-
-1. Reads `w/surstor/artifacts/{hash}`
-2. Returns the content object, or throws if not found
+1. SELECT from `artifacts WHERE hash = ?`
+2. Returns full content object, or throws if not found
 
 ### `sur_list({ tag, limit })`
-
-**With tag:**
-1. Lists `w/surstor/tags/{tag}/` → array of hash keys
-2. For each hash (up to limit): reads `w/surstor/artifacts/{hash}`
-3. Returns array of content objects sorted newest first
-
-**Without tag (list all):**
-1. Lists `w/surstor/artifacts/` → all hash keys
-2. Reads each up to limit
-3. Returns sorted array
+- With tag: `WHERE tags LIKE '%"tag"%'` (JSON array substring match)
+- Without tag: all rows, newest first
 
 ### `sur_link(fromHash, rel, toHash)`
-
-1. Builds link object: `{ from, rel, to, created_at }`
-2. Writes to `w/surstor/links/{fromHash}/{rel}/{toHash}`
-3. Returns the link object
-
-Supported rel types (convention, not enforced): `follows`, `supersedes`, `references`, `corrects`, `responds-to`
+1. INSERTs into `links` with `INSERT OR IGNORE` (idempotent)
+2. Returns link object
 
 ### `sur_links(hash, rel)`
-
-**With rel:**
-1. Lists `w/surstor/links/{hash}/{rel}/` → toHash keys
-2. Reads each link object
-
-**Without rel:**
-1. Lists `w/surstor/links/{hash}/` → rel name keys
-2. For each rel: lists `w/surstor/links/{hash}/{rel}/` → toHash keys
-3. Reads all link objects
+- SELECT from `links WHERE from_hash = ?` (optionally also `AND rel = ?`)
 
 ### `sur_memory({ limit, tag })`
+1. Calls `sur_list` to get recent snaps
+2. Formats each as a Markdown block with label, hash, tags, snapped_at, and full summary
+3. Returns joined string ready for Claude context injection
 
-1. Calls `sur_list({ tag: 'session-snapshot', limit })`
-2. Formats each item as a Markdown block:
-   ```
-   ## {label}
-   hash: {hash}
-   tags: {tags}
-   snapped: {snapped_at}
+### `sur_export(hash, { outputDir })`
+1. Calls `sur_get` to fetch the artifact
+2. Formats as `.md` with frontmatter-style header
+3. Writes to `{outputDir}/{label}.md` (defaults to `exports/` in repo dir)
 
-   {summary}
-   ```
-3. Returns joined string ready for context injection
+### `sur_capture(sessionPath, { label })`
+1. Reads a Claude Code `.jsonl` transcript file
+2. Parses user/assistant message entries
+3. Calls `sur_snap` with a label, message count summary, and `['transcript', 'full-capture']` tags
 
----
+### `sur_ls({ tag, limit })`
+Directory-style listing from SQLite — shows hash, label, date, and non-base tags for each artifact.
 
-## Why Covia vs. The Alternatives
-
-### vs. DLFS (v1)
-
-DLFS was a bare HTTP file server that stored blobs in memory. It had no persistence guarantee — every restart wiped all content. Only the SQLite metadata index survived because that was a file on disk. Result: hashes in the index pointed to content that no longer existed.
-
-Covia writes to its internal lattice store on disk. Content survives restarts.
-
-### vs. SQLite directly
-
-SQLite requires a running process, a schema, migrations, and a query layer. It's single-node and not replication-aware. Covia's workspace is already a distributed lattice — replication is built in at the infrastructure level.
-
-### vs. Filesystem (plain files)
-
-Markdown files and plain filesystem storage work until they don't: no content-addressing, no provenance, no querying, silent truncation (Claude's MEMORY.md hits 200-line limits), and no cross-client availability. See: [stopusingmarkdownformemory.com](https://stopusingmarkdownformemory.com).
+### `sur_tree(hash, { dir, depth })`
+- `dir=down`: recursive walk following outgoing links (what this references)
+- `dir=up`: scan `links WHERE to_hash = ?` to find inbound references
 
 ---
 
-## Content-Addressing
+## MCP Layer
 
-The hash is computed from the JSON-serialized content object, not a UUID or timestamp. This means:
+`mcp-server.mjs` is a pure protocol adapter:
+1. Starts MCP `Server` with `StdioServerTransport`
+2. Registers 10 tools with JSON Schema definitions
+3. Routes `tools/call` to matching `surstor.mjs` function
+4. Returns result as `content[0].text`
 
-- **Deterministic** — same content always produces the same hash
-- **Tamper-evident** — changing content changes the hash
-- **Deduplication** — writing the same snap twice is a no-op (same path)
-- **Portable** — the hash is the only ID you need to retrieve from any node
-
-The hash format is `sha256:{64 hex chars}`.
-
----
-
-## The MCP Layer
-
-`mcp-server.mjs` is a thin adapter. It:
-
-1. Starts an MCP `Server` with `StdioServerTransport`
-2. Registers 6 tools with JSON Schema parameter definitions
-3. On `tools/call`, routes to the matching `surstor.mjs` function
-4. Serializes the return value as MCP `content[0].text`
-
-The MCP server has no state of its own — it's purely a protocol adapter over the `surstor.mjs` library.
+No state in the MCP server — all state is in `surstor.db`.
 
 ---
 
-## Cross-Client Persistence
+## Snap-as-Memory Doctrine
 
-Because all data lives in Covia (not in any Claude process), any client that can reach the Covia venue can read and write:
+Snaps are the canonical memory unit:
 
 ```
-Claude Code session  ─┐
-                       ├→ Covia venue (localhost:8090) ← shared state
-Claude Desktop       ─┤
-                       │
-claude.ai (via MCP)  ─┘
+sur_snap → surstor.db (full content, durable)
+MEMORY.md → lightweight pointer index (≤200 lines, one hash + label per snap)
+memory/*.md → user/feedback/project facts only (not snap transcripts)
 ```
 
-Proven: `sha256:9ae3d3a1...` was written from claude.ai and read back by Claude Code in the same day.
+Never duplicate snap content into `.md` files. The snap stores the full text. The hash is the retrieval key.
 
 ---
 
-## What Covia Stores Internally
+## Backup
 
-Covia uses a lattice/CRDT architecture (designed by Mike Anderson). Internally it uses content-addressed block storage similar to git's object model — content is stored once by hash, and the workspace paths are essentially a mutable index pointing into that immutable content store.
+```bash
+cp surstor.db surstor.db.bak
+```
 
-The physical files are inside the Covia JAR's data directory (typically wherever you launched the JAR from, in a `data/` or `.covia/` subdirectory). You should not need to touch these directly — always interact through the API.
+That's your entire history. The file is self-contained.

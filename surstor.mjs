@@ -1,106 +1,97 @@
-import { Grid } from '@covia/covia-sdk';
+import Database from 'better-sqlite3';
 import { createHash } from 'crypto';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
+import { mkdirSync, writeFileSync } from 'fs';
 
-const venue = await Grid.connect(process.env.COVIA_URL || 'http://localhost:8090');
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const db = new Database(join(__dirname, 'surstor.db'));
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS artifacts (
+    hash       TEXT PRIMARY KEY,
+    label      TEXT,
+    tags       TEXT NOT NULL DEFAULT '[]',
+    summary    TEXT,
+    snapped_at TEXT NOT NULL,
+    size       INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_snapped ON artifacts(snapped_at DESC);
+
+  CREATE TABLE IF NOT EXISTS links (
+    link_hash  TEXT NOT NULL,
+    from_hash  TEXT NOT NULL,
+    to_hash    TEXT NOT NULL,
+    rel        TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_links_from ON links(from_hash);
+  CREATE INDEX IF NOT EXISTS idx_links_to   ON links(to_hash);
+`);
 
 // ── sur_snap ──────────────────────────────────────────────────────────────────
 export async function sur_snap(label, summary, tags = []) {
   const normalizedTags = Array.from(new Set(['session-snapshot', ...tags]));
-  const content = { type: 'session-snapshot', label, summary, tags: normalizedTags, snapped_at: new Date().toISOString() };
+  const snapped_at = new Date().toISOString();
+  const content = { type: 'session-snapshot', label, summary, tags: normalizedTags, snapped_at };
   const json = JSON.stringify(content);
   const hash = 'sha256:' + createHash('sha256').update(json).digest('hex');
+  const size = Buffer.byteLength(json, 'utf8');
 
-  await venue.run('v/ops/covia/write', { path: `w/surstor/artifacts/${hash}`, value: content });
-  await venue.run('v/ops/covia/write', { path: `w/surstor/labels/${label}`, value: hash });
-  for (const tag of tags) {
-    await venue.run('v/ops/covia/write', { path: `w/surstor/tags/${tag}/${hash}`, value: content.snapped_at });
+  const existing = db.prepare('SELECT hash FROM artifacts WHERE hash = ?').get(hash);
+  if (!existing) {
+    db.prepare('INSERT INTO artifacts (hash, label, tags, summary, snapped_at, size) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(hash, label, JSON.stringify(normalizedTags), summary, snapped_at, size);
   }
-  return { hash, label };
+
+  return { hash, label, deduplicated: !!existing };
 }
 
 // ── sur_get ───────────────────────────────────────────────────────────────────
 export async function sur_get(hash) {
-  const result = await venue.run('v/ops/covia/read', { path: `w/surstor/artifacts/${hash}` });
-  if (!result.exists) throw new Error(`Not found: ${hash}`);
-  return result.value;
+  const row = db.prepare('SELECT * FROM artifacts WHERE hash = ?').get(hash);
+  if (!row) throw new Error(`Not found: ${hash}`);
+  return {
+    type: 'session-snapshot',
+    label: row.label,
+    summary: row.summary,
+    tags: JSON.parse(row.tags),
+    snapped_at: row.snapped_at,
+    hash: row.hash,
+  };
 }
 
 // ── sur_list ──────────────────────────────────────────────────────────────────
 export async function sur_list({ tag, limit = 20 } = {}) {
-  if (tag) {
-    const index = await venue.run('v/ops/covia/list', { path: `w/surstor/tags/${tag}/` });
-    if (!index.exists) return [];
-    const hashes = index.keys.slice(0, limit);
-    const items = await Promise.all(hashes.map(async h => {
-      const r = await venue.run('v/ops/covia/read', { path: `w/surstor/artifacts/${h}` });
-      return r.exists ? { hash: h, ...r.value } : null;
-    }));
-    return items.filter(Boolean);
-  }
-
-  // No tag — list all artifacts
-  const index = await venue.run('v/ops/covia/list', { path: 'w/surstor/artifacts/' });
-  if (!index.exists) return [];
-  const hashes = index.keys.slice(0, limit);
-  const items = await Promise.all(hashes.map(async h => {
-    const r = await venue.run('v/ops/covia/read', { path: `w/surstor/artifacts/${h}` });
-    return r.exists ? { hash: h, label: r.value.label, tags: r.value.tags, snapped_at: r.value.snapped_at } : null;
-  }));
-  return items.filter(Boolean);
+  const rows = tag
+    ? db.prepare(`SELECT hash, label, tags, snapped_at FROM artifacts WHERE tags LIKE ? ORDER BY snapped_at DESC LIMIT ?`).all(`%"${tag}"%`, limit)
+    : db.prepare(`SELECT hash, label, tags, snapped_at FROM artifacts ORDER BY snapped_at DESC LIMIT ?`).all(limit);
+  return rows.map(r => ({ hash: r.hash, label: r.label, tags: JSON.parse(r.tags), snapped_at: r.snapped_at }));
 }
 
 // ── sur_link ──────────────────────────────────────────────────────────────────
-// rel: 'follows' | 'supersedes' | 'references'
 export async function sur_link(fromHash, rel, toHash) {
-  const link = { from: fromHash, rel, to: toHash, created_at: new Date().toISOString() };
-  await venue.run('v/ops/covia/write', {
-    path: `w/surstor/links/${fromHash}/${rel}/${toHash}`,
-    value: link
-  });
+  const created_at = new Date().toISOString();
+  const link = { from: fromHash, rel, to: toHash, created_at };
+  db.prepare('INSERT OR IGNORE INTO links (link_hash, from_hash, to_hash, rel, created_at) VALUES (?, ?, ?, ?, ?)')
+    .run(`${fromHash}:${rel}:${toHash}`, fromHash, toHash, rel, created_at);
   return link;
 }
 
 // ── sur_links ─────────────────────────────────────────────────────────────────
-// List all links from a given hash (optionally filter by rel)
 export async function sur_links(hash, rel = null) {
-  const basePath = rel
-    ? `w/surstor/links/${hash}/${rel}/`
-    : `w/surstor/links/${hash}/`;
-  const index = await venue.run('v/ops/covia/list', { path: basePath });
-  if (!index.exists) return [];
-
-  const results = [];
-  for (const key of index.keys) {
-    if (rel) {
-      // key is the toHash directly
-      const r = await venue.run('v/ops/covia/read', { path: `${basePath}${key}` });
-      if (r.exists) results.push(r.value);
-    } else {
-      // key is a rel name — recurse one level
-      const relIndex = await venue.run('v/ops/covia/list', { path: `w/surstor/links/${hash}/${key}/` });
-      if (relIndex.exists) {
-        for (const toHash of relIndex.keys) {
-          const r = await venue.run('v/ops/covia/read', { path: `w/surstor/links/${hash}/${key}/${toHash}` });
-          if (r.exists) results.push(r.value);
-        }
-      }
-    }
-  }
-  return results;
+  const rows = rel
+    ? db.prepare('SELECT * FROM links WHERE from_hash = ? AND rel = ?').all(hash, rel)
+    : db.prepare('SELECT * FROM links WHERE from_hash = ?').all(hash);
+  return rows.map(r => ({ from: r.from_hash, rel: r.rel, to: r.to_hash, created_at: r.created_at }));
 }
 
-// ── sur_export ────────────────────────────────────────────────────────────────
-// Write a snap's content to DLFS as a human-readable .md file
-// Creates the drive if it doesn't exist, then writes /sessions/{label}.md
-export async function sur_export(hash, { drive = 'surstor' } = {}) {
+// ── sur_export — write snap to local .md file ─────────────────────────────────
+export async function sur_export(hash, { outputDir } = {}) {
   const artifact = await sur_get(hash);
+  const dir = outputDir ?? join(__dirname, 'exports');
+  mkdirSync(dir, { recursive: true });
 
-  // Ensure drive exists
-  try {
-    await venue.run('v/ops/dlfs/create-drive', { name: drive });
-  } catch {}  // already exists is fine
-
-  // Format as markdown
   const md = [
     `# ${artifact.label}`,
     ``,
@@ -110,20 +101,17 @@ export async function sur_export(hash, { drive = 'surstor' } = {}) {
     ``,
     `---`,
     ``,
-    artifact.summary || artifact.content || '(no content)',
+    artifact.summary || '(no content)',
   ].join('\n');
 
-  const path = `/sessions/${artifact.label}.md`;
-  await venue.run('v/ops/dlfs/write', { drive, path, content: md });
-  return { drive, path, label: artifact.label };
+  const filename = `${artifact.label}.md`;
+  const filepath = join(dir, filename);
+  writeFileSync(filepath, md, 'utf8');
+  return { path: filepath, label: artifact.label };
 }
 
-// ── sur_capture ───────────────────────────────────────────────────────────────
-// Read a Claude Code session JSONL and write the full transcript to DLFS.
-// sessionPath: absolute path to the .jsonl file
-// label: name for the transcript file (default: session-{timestamp})
-// drive: DLFS drive name (default: surstor)
-export async function sur_capture(sessionPath, { label, drive = 'surstor' } = {}) {
+// ── sur_capture — snap a Claude Code session transcript ───────────────────────
+export async function sur_capture(sessionPath, { label } = {}) {
   const { readFileSync } = await import('fs');
   const { basename } = await import('path');
 
@@ -153,89 +141,50 @@ export async function sur_capture(sessionPath, { label, drive = 'surstor' } = {}
   const sessionId = basename(sessionPath, '.jsonl');
   const ts = messages[0]?.ts?.slice(0, 10) ?? new Date().toISOString().slice(0, 10);
   const fileLabel = label ?? `session-${ts}-${sessionId.slice(0, 8)}`;
+  const summary = `Full transcript captured from ${sessionPath}. ${messages.length} messages.`;
 
-  const md = [
-    `# Session Transcript: ${fileLabel}`,
-    ``,
-    `**Session ID:** ${sessionId}`,
-    `**Date:** ${ts}`,
-    `**Messages:** ${messages.length}`,
-    ``,
-    `---`,
-    ``,
-    ...messages.map(m => [
-      `### ${m.role === 'user' ? 'User' : 'Claude'} — ${m.ts ?? ''}`,
-      ``,
-      m.content,
-      ``,
-    ].join('\n')),
-  ].join('\n');
-
-  // Ensure drive exists
-  try { await venue.run('v/ops/dlfs/create-drive', { name: drive }); } catch {}
-
-  const path = `/transcripts/${fileLabel}.md`;
-  await venue.run('v/ops/dlfs/write', { drive, path, content: md });
-
-  // Also snap a reference into SurStor so it's findable by hash
-  const { hash } = await sur_snap(
-    fileLabel,
-    `Full transcript captured from ${sessionPath}. ${messages.length} messages. Stored in DLFS at ${drive}:${path}`,
-    ['transcript', 'full-capture']
-  );
-
-  return { drive, path, label: fileLabel, messages: messages.length, hash };
+  const { hash } = await sur_snap(fileLabel, summary, ['transcript', 'full-capture']);
+  return { label: fileLabel, messages: messages.length, hash };
 }
 
-// ── sur_ls ────────────────────────────────────────────────────────────────────
-// List files/dirs in a DLFS drive. Lists drives if no drive given.
-export async function sur_ls({ drive, path = '/' } = {}) {
-  if (!drive) {
-    const result = await venue.run('v/ops/dlfs/list-drives', {});
-    return { drives: result?.drives ?? result ?? [] };
-  }
-  const result = await venue.run('v/ops/dlfs/list', { drive, path });
-  return { drive, path, entries: result?.entries ?? result ?? [] };
+// ── sur_ls — directory-style listing from SQLite ─────────────────────────────
+export async function sur_ls({ tag, limit = 50 } = {}) {
+  const rows = await sur_list({ tag, limit });
+  if (!rows.length) return { entries: [], note: tag ? `No artifacts tagged "${tag}"` : 'Store is empty' };
+  return {
+    entries: rows.map(r => ({
+      hash: r.hash,
+      label: r.label,
+      snapped_at: r.snapped_at.slice(0, 10),
+      tags: r.tags.filter(t => t !== 'session-snapshot'),
+    })),
+    total: db.prepare('SELECT COUNT(*) as n FROM artifacts').get().n,
+  };
 }
 
 // ── sur_tree ──────────────────────────────────────────────────────────────────
-// Walk the provenance graph from an artifact (follows outgoing links)
-// dir: 'down' (default) = follow what this artifact links to (its references/ancestors)
-//      'up' = scan for artifacts that link TO this hash (expensive, full scan)
 export async function sur_tree(hash, { dir = 'down', depth = 10 } = {}) {
   const visited = new Set();
 
   async function walk(h, d) {
     if (d <= 0 || visited.has(h)) return { hash: h, truncated: true };
     visited.add(h);
-
     let label = '(unknown)', snapped_at = null;
-    try {
-      const art = await sur_get(h);
-      label = art.label;
-      snapped_at = art.snapped_at;
-    } catch {}
-
+    try { const a = await sur_get(h); label = a.label; snapped_at = a.snapped_at; } catch {}
     const links = await sur_links(h);
     const branches = await Promise.all(
-      links.map(async link => ({
-        rel: link.rel,
-        node: await walk(link.to, d - 1)
-      }))
+      links.map(async link => ({ rel: link.rel, node: await walk(link.to, d - 1) }))
     );
-
     return { hash: h, label, snapped_at, branches };
   }
 
   if (dir === 'up') {
-    // Scan all artifacts for ones that link to this hash
-    const all = await sur_list({ limit: 200 });
+    const rows = db.prepare('SELECT from_hash, rel FROM links WHERE to_hash = ?').all(hash);
     const inbound = [];
-    for (const item of all) {
-      const links = await sur_links(item.hash);
-      if (links.some(l => l.to === hash)) {
-        inbound.push({ hash: item.hash, label: item.label, snapped_at: item.snapped_at, rel: links.find(l => l.to === hash).rel });
-      }
+    for (const row of rows) {
+      let label = '(unknown)', snapped_at = null;
+      try { const a = await sur_get(row.from_hash); label = a.label; snapped_at = a.snapped_at; } catch {}
+      inbound.push({ hash: row.from_hash, label, snapped_at, rel: row.rel });
     }
     return { hash, dir: 'up', inbound };
   }
@@ -244,17 +193,19 @@ export async function sur_tree(hash, { dir = 'down', depth = 10 } = {}) {
 }
 
 // ── sur_memory ────────────────────────────────────────────────────────────────
-// Surface recent session snapshots for context injection
 export async function sur_memory({ limit = 5, tag = 'session-snapshot' } = {}) {
   const items = await sur_list({ tag, limit });
   if (!items.length) return 'No memory found.';
 
-  return items.map(item => [
-    `## ${item.label}`,
-    `hash: ${item.hash}`,
-    `tags: ${item.tags?.join(', ')}`,
-    `snapped: ${item.snapped_at}`,
-    '',
-    item.summary || item.content || '',
-  ].join('\n')).join('\n\n---\n\n');
+  return items.map(item => {
+    const row = db.prepare('SELECT summary FROM artifacts WHERE hash = ?').get(item.hash);
+    return [
+      `## ${item.label}`,
+      `hash: ${item.hash}`,
+      `tags: ${item.tags?.join(', ')}`,
+      `snapped: ${item.snapped_at}`,
+      '',
+      row?.summary || '',
+    ].join('\n');
+  }).join('\n\n---\n\n');
 }

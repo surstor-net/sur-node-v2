@@ -1,18 +1,25 @@
 {
   "name": "sur-node-v2",
-  "version": "2.0.0",
-  "description": "SurStor v2 — artifact memory for AI sessions, built on Covia",
+  "version": "2.1.0",
+  "description": "SurStor v2 — persistent artifact memory for AI sessions, SQLite-backed MCP server",
   "main": "mcp-server.mjs",
   "type": "module",
   "scripts": {
-    "start": "node mcp-server.mjs"
+    "start": "node mcp-server.mjs",
+    "test": "node test-all.mjs"
   },
-  "keywords": ["surstor", "mcp", "covia", "memory", "ai-agents"],
+  "keywords": [
+    "surstor",
+    "mcp",
+    "memory",
+    "ai-agents",
+    "sqlite",
+    "claude"
+  ],
   "author": "Rich Kopcho",
   "license": "MIT",
   "dependencies": {
-    "@covia/covia-sdk": "^1.1.0",
-    "@covia/covialib": "^1.0.0",
-    "@modelcontextprotocol/sdk": "^1.29.0"
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "better-sqlite3": "^12.9.0"
   }
 }

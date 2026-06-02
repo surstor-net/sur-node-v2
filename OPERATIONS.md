@@ -1,220 +1,141 @@
 # OPERATIONS.md — SurStor v2 Runbook
 
-Day-to-day guide for keeping the stack running. Three services, one dependency order.
+No daemons, no services. The only thing that needs to be running is Claude itself.
 
 ---
 
-## Startup Order
+## Installation
 
-Always start in this order:
-
+```bash
+git clone https://github.com/surstor-net/sur-node-v2
+cd sur-node-v2
+npm install
+npm test       # verify everything works
 ```
-1. Covia (port 8090)   ← sur-node-v2 depends on this
-2. Claude Desktop      ← picks up sur-node-v2 from config on launch
-```
 
-If Covia isn't running when Claude Desktop starts, `sur-node-v2` will fail to connect and show as broken in the MCP tools menu.
+`surstor.db` is created automatically on first snap. Nothing else to set up.
 
 ---
 
-## Starting Covia
+## Wiring to Claude
 
-Covia runs as a JAR. From the directory containing the JAR:
+### Claude Code (`~/.claude.json`)
 
-```bash
-java -jar covia-*.jar
-```
-
-Or if you know the exact JAR name:
-```bash
-java -jar covia-2026-04-13.jar
-```
-
-Verify it's running:
-```bash
-curl http://localhost:8090/api/v1/status
-```
-
-Expected response:
-```json
-{
-  "status": "ok",
-  "peer": "did:covia:local",
-  ...
-}
-```
-
-Default port: **8090**. If you need a different port, pass `--port XXXX` and update `COVIA_URL` in claude_desktop_config.json.
-
----
-
-## Checking sur-node-v2 Health
-
-### From the command line
-```bash
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | node C:/Users/rich/PROJECTS/sur-v2/mcp-server.mjs
-```
-
-Expected: JSON response listing all 7 tools (`sur_snap`, `sur_get`, `sur_list`, `sur_link`, `sur_links`, `sur_memory`, `sur_tree`).
-
-### From Claude Desktop
-
-Click the hammer icon (🔨) in the chat input. You should see:
-- `sur-node` — v1, DLFS-backed
-- `sur-node-v2` — Covia-backed, this repo
-
-Each should be expandable to show its tools. A red dot or missing entry means the server failed to start.
-
-### From Claude Desktop logs
-
-```
-C:\Users\rich\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\logs\
-```
-
-Look for `mcp-server.log` or similar. Successful startup shows:
-```
-Server started and connected successfully
-tools/list → 6 tools returned
-```
-
----
-
-## Running the Integration Test
-
-```bash
-cd C:/Users/rich/PROJECTS/sur-v2
-node test-all.mjs
-```
-
-This exercises all 6 functions against the live Covia venue. If it completes without errors, everything is working end-to-end.
-
----
-
-## Claude Desktop Config
-
-**Location:**
-```
-C:\Users\rich\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude_desktop_config.json
-```
-
-**Archived v1 config (before sur-node-v2 was added):**
-```
-claude_desktop_config.v1-sur-node-2026-04-15.json
-```
-
-**Current relevant section:**
 ```json
 {
   "mcpServers": {
-    "sur-node": {
-      "command": "node",
-      "args": ["C:/Users/rich/PROJECTS/sur-node/index.js"],
-      "env": {
-        "DLFS_URL": "http://127.0.0.1:8080",
-        "MEMORY_PATH": "C:\\Users\\rich\\.claude\\projects\\C--Users-rich\\memory"
-      }
-    },
     "sur-node-v2": {
       "command": "node",
-      "args": ["C:/Users/rich/PROJECTS/sur-v2/mcp-server.mjs"],
-      "env": {
-        "COVIA_URL": "http://localhost:8090"
-      }
+      "args": ["/absolute/path/to/sur-node-v2/mcp-server.mjs"]
     }
   }
 }
 ```
 
-After any change to this file, use the **Relaunch** button in Claude Desktop (or fully restart it).
+### Claude Desktop — Windows
+
+File: `C:\Users\{you}\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "sur-node-v2": {
+      "command": "node",
+      "args": ["C:/path/to/sur-node-v2/mcp-server.mjs"]
+    }
+  }
+}
+```
+
+### Claude Desktop — Mac
+
+File: `~/Library/Application Support/Claude/claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "sur-node-v2": {
+      "command": "node",
+      "args": ["/path/to/sur-node-v2/mcp-server.mjs"]
+    }
+  }
+}
+```
+
+Restart Claude Desktop after editing the config.
+
+---
+
+## Health Checks
+
+### Test MCP server responds
+```bash
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | node mcp-server.mjs
+```
+Expected: JSON listing all 10 tools.
+
+### Run integration test
+```bash
+npm test
+```
+Expected: snap hashes, get result, list, link, memory output — no errors.
+
+### Check what's in the store
+```bash
+node -e "import('./surstor.mjs').then(m => m.sur_list(10).then(r => console.log(JSON.stringify(r, null, 2))))"
+```
 
 ---
 
 ## Troubleshooting
 
-### sur-node-v2 not showing in hammer menu
+### Tools not showing in Claude Desktop
 
-1. Check Covia is running: `curl http://localhost:8090/api/v1/status`
-2. Check the MCP server starts cleanly (run the tools/list test above)
-3. Check claude_desktop_config.json path is correct for your machine
-4. Hit **Relaunch** in Claude Desktop (not just close/reopen — use the relaunch button)
-5. Check logs in the Claude AppData directory
+1. Check the path in config points to the right `mcp-server.mjs`
+2. Run the tools/list health check above to confirm the server starts
+3. Hit **Relaunch** in Claude Desktop (not just close/reopen)
+4. Check Claude Desktop logs: `AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\logs\`
 
 ### `sur_snap` returns an error
 
-Most likely Covia isn't running. Verify with:
-```bash
-curl http://localhost:8090/api/v1/status
-```
+Check Node.js version (`node --version` — needs 18+). Check `better-sqlite3` is installed (`npm install`). The database file is created automatically — no manual setup needed.
 
-If Covia is running but you get a path error, check that the path starts with `w/`. The Covia workspace namespace requires it.
+### `sur_get` returns "Not found"
 
-### `sur_get` returns 404 / not found
+The hash must exist in `surstor.db`. Use `sur_list` to see what's stored. Old hashes from before the SQLite migration (pre-2026-05-10) no longer exist — those were in Covia's memory and are gone.
 
-- If using **v1** (`sur-node`): DLFS data is in-memory and lost on restart. This is the known v1 limitation. Use v2.
-- If using **v2** (`sur-node-v2`): hash may be wrong, or the artifact was written to a different venue instance. Try `sur_list` to see what's actually stored.
+### Corrupt or missing `surstor.db`
 
-### `sur_memory` returns "No memory found"
-
-All snaps must have the `session-snapshot` tag to appear in `sur_memory`. As of v2, this tag is auto-injected by `sur_snap`. If you have old snaps without it, they won't surface — use `sur_list` with no tag filter to find them.
-
-### Covia won't start / port conflict
-
-Check if something else is on 8090:
-```bash
-netstat -ano | findstr :8090
-```
-
-Kill the conflicting process or pass a different port to the JAR and update `COVIA_URL` in the Desktop config.
+Delete it and the database will be recreated empty on next snap. You'll lose history but the server won't break.
 
 ---
 
-## Known Gaps (as of 2026-04-15)
+## Updating
 
-### Covia autostart
-
-Two scripts are included:
-
-- `covia-start.bat` — launches Covia if not already running, waits for readiness. Edit `COVIA_DIR` at the top to point at your JAR folder.
-- `covia-autostart-install.ps1` — registers `covia-start.bat` as a Windows Task Scheduler task that fires at login.
-
-**To install:**
-```powershell
-# Run once as Administrator
-powershell -ExecutionPolicy Bypass -File C:\Users\rich\PROJECTS\sur-v2\covia-autostart-install.ps1
+```bash
+git pull
+npm install   # only if package.json changed
 ```
 
-**To test manually:**
-```cmd
-schtasks /run /tn CoviaAutostart
+Restart Claude Desktop (or reload the MCP server in Claude Code) to pick up changes.
+
+---
+
+## Backup
+
+```bash
+cp surstor.db surstor.db.backup-$(date +%Y%m%d)
 ```
 
-### DLFS (v1) still running alongside v2
-
-Both sur-node and sur-node-v2 are active in Claude Desktop. This is intentional during the transition — v1 has historical metadata (labels, tags) in SQLite even though the blob content is lost. Once you've confirmed all active work is in v2, sur-node can be removed from claude_desktop_config.json.
-
-### `sur_tree` ported to v2
-
-`sur_tree` is now the 7th MCP tool. `dir=down` follows outgoing links recursively; `dir=up` does a full scan for inbound links (slower on large stores).
+The entire history is in that one file. Store it anywhere.
 
 ---
 
 ## Services Reference
 
-| Service | Port | Start Command | Health Check |
-|---------|------|---------------|--------------|
-| Covia | 8090 | `java -jar covia-*.jar` | `curl localhost:8090/api/v1/status` |
-| DLFS (v1) | 8080 | (separate process) | `curl localhost:8080/dlfs/` |
-| sur-rest.js (v1) | 3000 | (separate process) | `curl -H "X-SurStor-Key: winnow123" localhost:3000/api/v1/artifacts` |
-| sur-node-v2 | stdio | via Claude Desktop MCP | `echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \| node mcp-server.mjs` |
+| Component | What It Is | How to Start |
+|-----------|-----------|--------------|
+| `mcp-server.mjs` | MCP stdio server | Launched automatically by Claude via config |
+| `surstor.db` | SQLite database | Created automatically on first snap |
 
----
-
-## Updating sur-node-v2
-
-```bash
-cd C:/Users/rich/PROJECTS/sur-v2
-git pull
-npm install   # only needed if package.json changed
-```
-
-Then hit **Relaunch** in Claude Desktop to pick up the changes.
+Nothing else to run.

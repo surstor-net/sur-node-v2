@@ -4,7 +4,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { sur_snap, sur_get, sur_list, sur_link, sur_links, sur_memory, sur_tree, sur_export, sur_ls, sur_capture } from './surstor.mjs';
 
 const server = new Server(
-  { name: 'sur-node-v2', version: '2.0.0' },
+  { name: 'sur-node-v2', version: '2.1.0' },
   { capabilities: { tools: {} } }
 );
 
@@ -12,7 +12,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: 'sur_snap',
-      description: 'Snapshot this session into SurStor v2 (Covia-backed). Stores content + label + tag indexes.',
+      description: 'Snapshot this session into SurStor. Stores label, summary, and tags in a local SQLite database keyed by sha256 hash.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -25,18 +25,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'sur_get',
-      description: 'Retrieve an artifact from SurStor v2 by its sha256: hash.',
+      description: 'Retrieve an artifact from SurStor by its sha256: hash.',
       inputSchema: {
         type: 'object',
         properties: {
-          hash: { type: 'string', description: 'The sha256: hash' }
+          hash: { type: 'string', description: 'The sha256: hash returned by sur_snap' }
         },
         required: ['hash']
       }
     },
     {
       name: 'sur_list',
-      description: 'List artifacts from SurStor v2, newest first. Optionally filter by tag.',
+      description: 'List artifacts from SurStor, newest first. Optionally filter by tag.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -47,12 +47,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'sur_link',
-      description: 'Create a provenance link between two artifacts. rel: follows | supersedes | references',
+      description: 'Create a provenance link between two artifacts. rel: follows | supersedes | references | corrects | responds-to',
       inputSchema: {
         type: 'object',
         properties: {
           from: { type: 'string', description: 'Source sha256: hash' },
-          rel:  { type: 'string', description: 'Relationship type: follows | supersedes | references' },
+          rel:  { type: 'string', description: 'Relationship type' },
           to:   { type: 'string', description: 'Target sha256: hash' }
         },
         required: ['from', 'rel', 'to']
@@ -83,48 +83,47 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'sur_export',
-      description: 'Export a snap to DLFS as a human-readable .md file. Creates a named drive and writes /sessions/{label}.md.',
+      description: 'Export a snap as a human-readable .md file to a local directory. Defaults to an exports/ folder next to surstor.db.',
       inputSchema: {
         type: 'object',
         properties: {
-          hash:  { type: 'string', description: 'The sha256: hash to export' },
-          drive: { type: 'string', description: 'DLFS drive name (default: surstor)' }
+          hash:      { type: 'string', description: 'The sha256: hash to export' },
+          outputDir: { type: 'string', description: 'Absolute path to output directory (optional, defaults to exports/)' }
         },
         required: ['hash']
       }
     },
     {
       name: 'sur_capture',
-      description: 'Capture a full Claude Code session transcript from its .jsonl file and write it to DLFS. Also snaps a reference into SurStor. Use this at end of session for complete verbatim record — essential for 970.re agent audit trails.',
+      description: 'Capture a full Claude Code session transcript from its .jsonl file and snap it into SurStor.',
       inputSchema: {
         type: 'object',
         properties: {
-          sessionPath: { type: 'string', description: 'Absolute path to the .jsonl session file (e.g. C:/Users/rich/.claude/projects/C--Users-rich/{session-id}.jsonl)' },
-          label:       { type: 'string', description: 'Label for the transcript (default: session-{date}-{id})' },
-          drive:       { type: 'string', description: 'DLFS drive name (default: surstor)' }
+          sessionPath: { type: 'string', description: 'Absolute path to the .jsonl session file' },
+          label:       { type: 'string', description: 'Label for the transcript (default: session-{date}-{id})' }
         },
         required: ['sessionPath']
       }
     },
     {
       name: 'sur_ls',
-      description: 'List DLFS drives (no args) or files in a drive path. Browsing companion to sur_export.',
+      description: 'Directory-style listing of all artifacts in the store. Optionally filter by tag.',
       inputSchema: {
         type: 'object',
         properties: {
-          drive: { type: 'string', description: 'Drive name (omit to list all drives)' },
-          path:  { type: 'string', description: 'Path to list (default: /)' }
+          tag:   { type: 'string', description: 'Filter by tag (optional)' },
+          limit: { type: 'number', description: 'Max entries (default 50)' }
         }
       }
     },
     {
       name: 'sur_tree',
-      description: 'Walk the full provenance tree from an artifact. dir=down follows outgoing links (what this references); dir=up scans for inbound links (what references this).',
+      description: 'Walk the provenance tree from an artifact. dir=down follows outgoing links; dir=up finds inbound links.',
       inputSchema: {
         type: 'object',
         properties: {
           hash:  { type: 'string', description: 'The sha256: hash to start from' },
-          dir:   { type: 'string', description: 'Direction: down (default, outgoing) or up (inbound scan)' },
+          dir:   { type: 'string', description: 'Direction: down (default) or up' },
           depth: { type: 'number', description: 'Max hops to traverse (default 10)' }
         },
         required: ['hash']
@@ -138,38 +137,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     let result;
     switch (name) {
-      case 'sur_snap':
-        result = await sur_snap(args.label, args.summary, args.tags || []);
-        break;
-      case 'sur_get':
-        result = await sur_get(args.hash);
-        break;
-      case 'sur_list':
-        result = await sur_list({ tag: args.tag, limit: args.limit });
-        break;
-      case 'sur_link':
-        result = await sur_link(args.from, args.rel, args.to);
-        break;
-      case 'sur_links':
-        result = await sur_links(args.hash, args.rel);
-        break;
-      case 'sur_memory':
-        result = await sur_memory({ limit: args.limit, tag: args.tag });
-        break;
-      case 'sur_export':
-        result = await sur_export(args.hash, { drive: args.drive });
-        break;
-      case 'sur_capture':
-        result = await sur_capture(args.sessionPath, { label: args.label, drive: args.drive });
-        break;
-      case 'sur_ls':
-        result = await sur_ls({ drive: args.drive, path: args.path });
-        break;
-      case 'sur_tree':
-        result = await sur_tree(args.hash, { dir: args.dir, depth: args.depth });
-        break;
-      default:
-        throw new Error(`Unknown tool: ${name}`);
+      case 'sur_snap':    result = await sur_snap(args.label, args.summary, args.tags || []); break;
+      case 'sur_get':     result = await sur_get(args.hash); break;
+      case 'sur_list':    result = await sur_list({ tag: args.tag, limit: args.limit }); break;
+      case 'sur_link':    result = await sur_link(args.from, args.rel, args.to); break;
+      case 'sur_links':   result = await sur_links(args.hash, args.rel); break;
+      case 'sur_memory':  result = await sur_memory({ limit: args.limit, tag: args.tag }); break;
+      case 'sur_export':  result = await sur_export(args.hash, { outputDir: args.outputDir }); break;
+      case 'sur_capture': result = await sur_capture(args.sessionPath, { label: args.label }); break;
+      case 'sur_ls':      result = await sur_ls({ tag: args.tag, limit: args.limit }); break;
+      case 'sur_tree':    result = await sur_tree(args.hash, { dir: args.dir, depth: args.depth }); break;
+      default: throw new Error(`Unknown tool: ${name}`);
     }
     return { content: [{ type: 'text', text: typeof result === 'string' ? result : JSON.stringify(result, null, 2) }] };
   } catch (err) {

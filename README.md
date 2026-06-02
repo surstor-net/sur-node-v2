@@ -1,68 +1,25 @@
 # sur-node-v2
 
-**SurStor v2** — Agent artifact availability, built natively on [Covia](https://covia.network).
+**SurStor v2** — Persistent artifact memory for AI sessions, via MCP.
 
-Content-addressed session memory for AI agents. Snap a session, retrieve it anywhere, link artifacts into a provenance graph. No database, no REST server, no file system fragility — just a thin layer on top of Covia's lattice workspace.
+Content-addressed session snapshots stored in a local SQLite database. Snap a session, retrieve it by hash in any future session, link artifacts into a provenance graph. Works with Claude Code, Claude Desktop, and any MCP-compatible client.
 
 ---
 
 ## What It Is
 
-SurStor v2 is ~150 lines of JavaScript that gives any Claude session (Claude Code, Claude Desktop, claude.ai) persistent, cross-client memory backed by a Covia venue.
+~200 lines of JavaScript that gives any Claude session persistent memory across restarts, machines, and clients.
 
 Every snap is:
 - **Content-addressed** — sha256 hash is the canonical ID
-- **Lattice-stored** — survives restarts, survives across clients
-- **MCP-native** — exposed as 6 tools Claude can call directly
-
----
-
-## Architecture
-
-```
-claude.ai / Claude Desktop / Claude Code
-         ↓  MCP (stdio)
-   mcp-server.mjs          ← 6 MCP tools
-         ↓
-   surstor.mjs             ← core library (~100 lines)
-         ↓
-   Covia venue (port 8090) ← lattice storage, CAS, provenance
-         ↓
-   w/surstor/* namespace   ← workspace paths
-```
-
-### Workspace Layout
-
-```
-w/surstor/artifacts/{hash}          ← full artifact content
-w/surstor/labels/{label}            ← label → hash index
-w/surstor/tags/{tag}/{hash}         ← tag → hash index
-w/surstor/links/{from}/{rel}/{to}   ← provenance graph edges
-```
-
----
-
-## Tools (MCP)
-
-| Tool | Description |
-|------|-------------|
-| `sur_snap` | Snapshot current session — content + label + tags |
-| `sur_get` | Retrieve artifact by sha256 hash |
-| `sur_list` | List artifacts, optionally filtered by tag |
-| `sur_link` | Create a provenance link between two artifacts |
-| `sur_links` | List all links from a given artifact |
-| `sur_memory` | Surface recent session snapshots for context injection |
+- **Durable** — stored in `surstor.db` (SQLite), survives reboots
+- **MCP-native** — 10 tools Claude can call directly
 
 ---
 
 ## Install
 
-### Prerequisites
-
-- [Node.js](https://nodejs.org/) 18+
-- A running Covia venue (default: `http://localhost:8090`)
-
-### Setup
+**Prerequisites:** Node.js 18+. That's it.
 
 ```bash
 git clone https://github.com/surstor-net/sur-node-v2
@@ -70,72 +27,115 @@ cd sur-node-v2
 npm install
 ```
 
-### Test against your venue
-
+Verify it works:
 ```bash
-node test-all.mjs
+npm test
 ```
 
-Expected output:
-```
-snap 1: sha256:...
-snap 2: sha256:...
-get: session-two | 2026-04-...
-list (test): [ 'session-one', 'session-two' ]
-link: sha256:... -[follows]-> sha256:...
-links from h2: [ 'follows → sha256:...' ]
-── sur_memory ──
-## session-two
-...
-```
+Expected output: snap hashes, a get result, a list, a link, and memory output. No errors.
 
 ---
 
-## Wire into Claude Desktop
+## Wire into Claude
 
-Add to `claude_desktop_config.json`:
+### Claude Code
+
+Add to `~/.claude.json` under your project's `mcpServers`:
 
 ```json
 {
   "mcpServers": {
     "sur-node-v2": {
       "command": "node",
-      "args": ["C:/path/to/sur-node-v2/mcp-server.mjs"],
-      "env": {
-        "COVIA_URL": "http://localhost:8090"
-      }
+      "args": ["/absolute/path/to/sur-node-v2/mcp-server.mjs"]
     }
   }
 }
 ```
 
-Restart Claude Desktop. The 6 tools appear under the hammer (🔨) menu.
+### Claude Desktop (Windows)
+
+Add to `claude_desktop_config.json`:
+```
+C:\Users\{you}\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude_desktop_config.json
+```
+
+```json
+{
+  "mcpServers": {
+    "sur-node-v2": {
+      "command": "node",
+      "args": ["C:/path/to/sur-node-v2/mcp-server.mjs"]
+    }
+  }
+}
+```
+
+### Claude Desktop (Mac)
+
+```
+~/Library/Application Support/Claude/claude_desktop_config.json
+```
+
+```json
+{
+  "mcpServers": {
+    "sur-node-v2": {
+      "command": "node",
+      "args": ["/path/to/sur-node-v2/mcp-server.mjs"]
+    }
+  }
+}
+```
+
+Restart Claude Desktop after editing. The tools appear under the 🔨 menu.
 
 ---
 
-## Usage in a Session
+## Tools
 
-At the end of any session, tell Claude:
+| Tool | Description |
+|------|-------------|
+| `sur_snap` | Snapshot the session — label + summary + tags → sha256 hash |
+| `sur_get` | Retrieve any artifact by hash |
+| `sur_list` | List artifacts, newest first, optionally filtered by tag |
+| `sur_link` | Create a provenance link between two artifacts |
+| `sur_links` | List all links from an artifact |
+| `sur_memory` | Inject recent session context (formatted for Claude) |
+| `sur_export` | Write a snap as a readable `.md` file to disk |
+| `sur_capture` | Snap a full Claude Code `.jsonl` transcript by path |
+| `sur_ls` | Directory-style listing of the store |
+| `sur_tree` | Walk the full provenance graph from any artifact |
+
+---
+
+## Usage
+
+### Snap a session
+
+Tell Claude at the end of any session:
 
 > `sur-snap`
 
-Claude will call `sur_snap` with a label, summary, and tags. The hash is returned. Pass it to the next session:
+Claude calls `sur_snap` with a label, summary, and tags. You get back a hash.
 
-> `sur-get sha256:...`
+### Retrieve in a future session
 
-At the start of a new session:
+> `sur-get sha256:abc123...`
+
+### Load recent context at the start of a session
 
 > `sur-memory`
 
-Claude calls `sur_memory` and injects recent context automatically.
+Claude calls `sur_memory` and injects your last 5 sessions as context automatically.
 
 ---
 
 ## Tag Convention
 
-Every snap includes `session-snapshot` as a guaranteed base tag (injected automatically). This ensures `sur_memory` can always surface it. Additional tags are caller-provided:
+`session-snapshot` is auto-injected on every snap — this is what `sur_memory` queries. Add your own tags to filter by project:
 
-```js
+```
 sur_snap('my-label', 'summary...', ['project-x', 'milestone'])
 // stored tags: ['session-snapshot', 'project-x', 'milestone']
 ```
@@ -146,70 +146,52 @@ sur_snap('my-label', 'summary...', ['project-x', 'milestone'])
 
 Link artifacts to record relationships:
 
-```js
-// h2 supersedes h1
+```
 sur_link(h2, 'supersedes', h1)
-
-// h3 references an external doc
 sur_link(h3, 'references', docHash)
-
-// Supported rel types
-// follows | supersedes | references | corrects | responds-to
 ```
 
-Retrieve all links from an artifact:
+Supported rel types: `follows`, `supersedes`, `references`, `corrects`, `responds-to`
 
-```js
-sur_links(hash)           // all relationships
-sur_links(hash, 'follows') // filtered by rel type
+Walk the graph:
+
+```
+sur_tree(hash)           // outgoing links (what this references)
+sur_tree(hash, dir=up)   // inbound links (what references this)
 ```
 
 ---
 
-## Why Covia Instead of DLFS / SQLite
+## Storage
 
-SurStor v1 used DLFS (a bare HTTP file server) with a SQLite index and a REST layer (`sur-rest.js`). The problem: DLFS stored blobs in memory and lost everything on restart. Only the SQLite metadata survived.
+Everything lives in `surstor.db` in the repo directory. SQLite — no server, no daemon, no dependencies beyond Node.js.
 
-Covia's workspace is lattice-backed — content persists across restarts, replicates across peers, and is natively queryable. v2 eliminates DLFS, SQLite, and sur-rest.js entirely.
+```
+surstor.db
+├── artifacts  (hash, label, tags, summary, snapped_at, size)
+└── links      (from_hash, rel, to_hash, created_at)
+```
 
-v1 → v2 comparison:
-
-| | v1 | v2 |
-|--|----|----|
-| Storage | DLFS (volatile) | Covia workspace (lattice) |
-| Index | SQLite | Covia tag paths |
-| REST layer | sur-rest.js (~400 lines) | none |
-| MCP server | sur-node (~300 lines) | mcp-server.mjs (~120 lines) |
-| Persistence | Lost on restart | Survives restarts |
-| Cross-client | No | Yes |
+Backup: just copy `surstor.db`. That's your entire history.
 
 ---
 
 ## Files
 
 ```
-surstor.mjs        ← core library: snap/get/list/link/links/memory
-mcp-server.mjs     ← MCP stdio server, 6 tools
-test-all.mjs       ← integration test (all 6 functions)
+surstor.mjs      ← core library: all 10 functions
+mcp-server.mjs   ← MCP stdio server
+test-all.mjs     ← integration test
+surstor.db       ← your data (created on first snap)
 package.json
 ```
-
----
-
-## Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `COVIA_URL` | `http://localhost:8090` | Covia venue endpoint |
 
 ---
 
 ## Related
 
 - [SurStor](https://surstor.com) — Agent Artifact Availability network
-- [Covia](https://covia.network) — Lattice-based agent infrastructure (Mike Anderson)
-- [AAA Framework](https://cumulativecomputing.org) — Agent Artifact Availability theoretical foundation
-- [sur-node](https://github.com/surstor/sur-node) — v1 (DLFS-backed, still operational)
+- [AAA Framework](https://cumulativecomputing.org) — Cumulative Computing theoretical foundation
 
 ---
 

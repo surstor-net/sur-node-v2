@@ -1,6 +1,11 @@
 # Dependencies
 node_modules/
 
+# Database (personal data — each user has their own)
+surstor.db
+surstor.db.bak
+exports/
+
 # Scratch / prototype files (superseded by surstor.mjs)
 test.mjs
 sur-snap.mjs
