@@ -30,9 +30,7 @@ npm test
 
 ---
 
-## Wire into Claude (stdio — local)
-
-### Claude Code
+## Quick Start (Claude Code)
 
 Add to `~/.claude.json` under your project's `mcpServers`:
 
@@ -47,11 +45,15 @@ Add to `~/.claude.json` under your project's `mcpServers`:
 }
 ```
 
-### Claude Desktop — Windows
+---
 
-```
-C:\Users\{you}\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude_desktop_config.json
-```
+## Connecting Other AI Clients
+
+### 1. Claude Desktop
+
+**Works out of the box — stdio, no HTTP needed.**
+
+**Windows** — `C:\Users\{you}\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude_desktop_config.json`
 
 ```json
 {
@@ -64,11 +66,7 @@ C:\Users\{you}\AppData\Local\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Cl
 }
 ```
 
-### Claude Desktop — Mac
-
-```
-~/Library/Application Support/Claude/claude_desktop_config.json
-```
+**Mac** — `~/Library/Application Support/Claude/claude_desktop_config.json`
 
 ```json
 {
@@ -85,14 +83,15 @@ Restart Claude Desktop after editing. Tools appear under the 🔨 menu.
 
 ---
 
-## Wire into Other Clients
+### 2. Gemini CLI
 
-### Gemini CLI (stdio — works as-is)
+**Works out of the box — stdio, zero code changes needed.**
 
-Gemini CLI supports stdio MCP servers natively, same config format as Claude Desktop.
+Gemini CLI uses the same config format as Claude Desktop.
+
+`~/.gemini/settings.json`:
 
 ```json
-// ~/.gemini/settings.json
 {
   "mcpServers": {
     "sur-node-v2": {
@@ -103,77 +102,60 @@ Gemini CLI supports stdio MCP servers natively, same config format as Claude Des
 }
 ```
 
-### ChatGPT Apps (remote HTTPS required)
-
-ChatGPT only supports remote MCP servers — no local stdio. You need an HTTPS endpoint. See [HTTP Transport](#http-transport) below to expose sur-node-v2 over the network, then:
-
-1. Go to **ChatGPT Settings → Apps & Connectors**
-2. Add your server URL: `https://your-host/mcp`
-3. Complete OAuth if your server requires it
-
-> Requires ChatGPT Plus or Pro. Workspace admins must enable Developer Mode: Admin Settings → Permissions & Roles → Connected Data.
-
-### Gemini Enterprise / Google Workspace (remote HTTPS required)
-
-Gemini Enterprise uses Streamable HTTP transport exclusively (SSE is not supported). Same setup: expose via HTTP transport, then register your `https://your-host/mcp` endpoint in the Google Workspace MCP server data store.
-
-### Cursor / Windsurf / Other MCP Clients (stdio)
-
-Most IDE-based MCP clients use the same stdio config format as Claude Desktop. Check your client's MCP docs for the settings file location, then use the same `command`/`args` pattern.
-
-### DeepSeek
-
-DeepSeek's consumer app (`chat.deepseek.com`) has no MCP client surface. If you're building an agent with DeepSeek as the model backend, you can call MCP tools via their OpenAI-compatible API — wire the HTTP transport endpoint into your agent framework (LangChain, etc.).
-
 ---
 
-## HTTP Transport
+### 3. Remote HTTP Clients (Claude.ai, Grok Web, ChatGPT, Gemini Enterprise)
 
-To serve remote clients (ChatGPT, Gemini Enterprise, any browser-based client), use [`supergateway`](https://github.com/supermaven-inc/supergateway) to wrap the stdio server as a Streamable HTTP endpoint. No code changes to sur-node-v2 needed.
+Browser-based and enterprise clients can't run local stdio processes. Use [`supergateway`](https://github.com/supermaven-inc/supergateway) to expose the stdio server as a Streamable HTTP endpoint — no changes to sur-node-v2 required.
 
-### Quick start (local dev + ngrok tunnel)
+**Start the gateway:**
 
 ```bash
-# Terminal 1 — start HTTP gateway
 npx -y supergateway \
   --stdio "node /path/to/sur-node-v2/mcp-server.mjs" \
   --port 8000 \
   --outputTransport streamableHttp
+# MCP endpoint: http://localhost:8000/mcp
+```
 
-# Terminal 2 — expose publicly
+**Expose publicly** (dev/testing):
+
+```bash
 ngrok http 8000
 # → https://xxxx.ngrok.io/mcp
 ```
 
-Paste `https://xxxx.ngrok.io/mcp` into ChatGPT Apps or Gemini Enterprise.
-
-### Production
-
-Run supergateway behind nginx or Caddy for TLS termination, then add a bearer token check:
+**Production:** Put nginx or Caddy in front for TLS + auth:
 
 ```nginx
 location /mcp {
   proxy_pass http://localhost:8000;
-  # Add auth header validation here
+  if ($http_authorization != "Bearer your-token") { return 401; }
 }
 ```
 
-> **SSE vs Streamable HTTP:** SSE was deprecated in MCP spec 2025-03-26. Always use `--outputTransport streamableHttp` for new deployments. Note: `mcp-remote` (the stdio bridge used by older Claude Desktop setups) expects legacy SSE and is not compatible with Streamable HTTP — keep the native stdio path for local clients.
+**Per-client connection:**
+
+| Client | Where to paste the URL |
+|--------|----------------------|
+| **Claude.ai** | Settings → Connectors → Add (paid plan required) |
+| **Grok Web** | Settings → Connectors → "Bring Your Own MCP" |
+| **ChatGPT** | Settings → Apps → add connector URL (Plus/Pro; Developer Mode must be enabled by workspace admin) |
+| **Gemini Enterprise** | Google Workspace MCP server data store — StreamableHTTP only, OAuth setup required in Google Cloud |
+
+> **Note on Grok Build CLI:** If sur-node-v2 is already wired into Claude Code on the same machine, Grok Build auto-discovers the existing MCP config — no reconfiguration needed.
+
+> **SSE is deprecated.** MCP spec dropped SSE in 2025-03-26. Always use `--outputTransport streamableHttp`. The older `mcp-remote` bridge expects SSE and will not work with this setup — keep native stdio for local clients.
 
 ---
 
-## Shared Snaps (Multi-User)
+### 4. Shared Team Snap Store
 
-By default each user has their own `surstor.db`. For a team that wants shared memory across sessions and users, two realistic paths:
+By default each user has their own `surstor.db`. To share memory across a team, deploy one instance on a server and point everyone at it.
 
-### Option A: Central server (simplest)
-
-Deploy one instance of sur-node-v2 + supergateway on a VPS or [Fly.io](https://fly.io). Everyone points at the same HTTPS endpoint. All snaps land in a single `surstor.db`.
-
-SQLite in WAL mode (already enabled) handles concurrent reads well; writes serialize. For a small team of agents snapping sessions occasionally, this is fine.
+**Deploy on a VPS or [Fly.io](https://fly.io):**
 
 ```bash
-# On your server
 SURSTOR_DB=/data/shared-surstor.db \
   npx -y supergateway \
     --stdio "node /app/mcp-server.mjs" \
@@ -181,19 +163,19 @@ SURSTOR_DB=/data/shared-surstor.db \
     --outputTransport streamableHttp
 ```
 
-Protect the endpoint with a shared bearer token in your reverse proxy. All team members use `https://your-server/mcp` as their MCP server URL.
+**All team members use the same URL in their MCP config:**
 
-### Option B: Turso (cloud SQLite, scale-up path)
+```json
+{
+  "mcpServers": {
+    "sur-node-v2": {
+      "url": "https://your-server/mcp"
+    }
+  }
+}
+```
 
-[Turso](https://turso.tech) is a managed libSQL service (SQLite-compatible, HTTP-accessible, embedded replicas). It supports true concurrent writes via their new Turso Database engine.
-
-The migration requires swapping `better-sqlite3` for `@libsql/client` — libSQL's API is async where better-sqlite3 is sync, so it's a real rewrite of the DB layer (~30 lines). Worth doing if you need geographic distribution, managed backups, or high write concurrency.
-
-For most teams, **Option A is the right start.** Move to Turso when you outgrow it.
-
-### Option C: Git-syncing the .db file
-
-Don't. SQLite's binary format generates merge conflicts on every concurrent write. This only works as a read-only archive.
+SQLite WAL mode (already enabled) handles concurrent reads fine; writes serialize. For a small team snapping sessions occasionally this is sufficient. If you need geographic distribution or high write concurrency, migrate the DB layer to [Turso](https://turso.tech) (libSQL, SQLite-compatible, managed cloud).
 
 ---
 
